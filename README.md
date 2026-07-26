@@ -1,53 +1,53 @@
-# TUM-VI Corridor → OpenVINS & Kimera-VIO: Download, Inference, Visualization, and Unified Output
+# TUM-VI Corridor4 → OpenVINS (EKF) vs. Basalt vs. ORB-SLAM3 (Factor Graph): Download, Inference, Visualization, Unified Output
 
-This runbook covers five stages:
+Cleaned-up, single-sequence version of this runbook. Scope for now: **corridor4 only** — the shortest TUM-VI corridor sequence, good for iterating quickly across three systems before ever scaling back out to the full corridor1–5 set.
 
-1. Download the exact TUM-VI `corridor` files you need
-2. Build & run **OpenVINS** on them
-3. Build & run **Kimera-VIO** on them
-4. Normalize both outputs (+ ground truth) into **one common trajectory schema**
-5. Visualize and validate everything with `evo`, in a layout a downstream test script can consume
+Three systems, two paradigms:
 
-Assumes Ubuntu 20.04 + ROS1 Noetic (OpenVINS's most battle-tested combo) and a standalone (non-ROS) build of Kimera-VIO. If you're on 18.04/Melodic or ROS2, the same steps apply with the package names swapped — see the linked docs.
+| | OpenVINS | Basalt | ORB-SLAM3 |
+|---|---|---|---|
+| Paradigm | EKF (MSCKF) | Sliding-window nonlinear optimization + marginalization | Keyframe bundle adjustment + loop closure / relocalization |
+| TUM-VI calibration | ships a verified `tum_vi` config | ships `tumvi_512_ds_calib.json` / `tumvi_512_config.json` | ships `TUM_512.yaml` + timestamp/IMU association files |
+| Install | ROS 2 Jazzy + colcon | one-line installer script | plain CMake build, no ROS needed |
+| Output format | TUM, native | TUM, native | TUM, native |
+| Dataset input | ROS 2 bag | EuRoC/DSO tar folder | EuRoC/DSO tar folder |
 
----
-
-## 0. Why two downloads per sequence
-
-- **OpenVINS** is driven by `rosbag play`, so you need the **ROS bag** export.
-- **Kimera-VIO**'s standalone binary reads a folder directly (no ROS required), so you need the **EuRoC/DSO-style tar** export (a `mav0/` folder with `cam0/`, `cam1/`, `imu0/`, `mocap0/`).
-
-Both are official exports of the same underlying recording, so estimates from both systems are directly comparable, and the `mocap0` folder in the tar gives you one consistent ground-truth source for both.
+All three write TUM format natively — nothing to convert this time around.
 
 ---
 
-## 1. Download the TUM-VI corridor files
+## 0. Base directory
 
-The TUM-VI benchmark ships `corridor1`–`corridor5` (indoor loop, ground truth only at the start/end since the middle isn't covered by the motion-capture volume). Use the **512×512, calibrated** exports — that's the resolution OpenVINS's shipped `tum_vi` config was tuned against, and it's ~3x smaller than the 1024×1024 versions.
+Everything below assumes `~/code/vio_validation_harness` as the project root:
+
+```
+~/code/vio_validation_harness/
+  data/tumvi/{bags,euroc}/
+  results/{openvins,basalt,orbslam3,gt}/
+  scripts/
+```
+
+---
+
+## 1. Download the TUM-VI corridor4 files
 
 ```bash
-mkdir -p ~/data/tumvi/{bags,euroc}
-cd ~/data/tumvi
+BASE=~/code/vio_validation_harness
+mkdir -p "$BASE"/data/tumvi/{bags,euroc}
+cd "$BASE"/data/tumvi
 
-# ROS bags (for OpenVINS) — calibrated, 512x512
-for i in 1 2 3 4 5; do
-  wget -c "http://vision.in.tum.de/tumvi/calibrated/512_16/dataset-corridor${i}_512_16.bag" -P bags/
-done
+# ROS bag (OpenVINS) — calibrated, 512x512
+wget -c "http://vision.in.tum.de/tumvi/calibrated/512_16/dataset-corridor4_512_16.bag" -P bags/
 
-# EuRoC/DSO tars (for Kimera-VIO + ground truth) — calibrated, 512x512
-for i in 1 2 3 4 5; do
-  wget -c "http://vision.in.tum.de/tumvi/exported/euroc/512_16/dataset-corridor${i}_512_16.tar" -P euroc/
-  tar -xf "euroc/dataset-corridor${i}_512_16.tar" -C euroc/
-done
+# EuRoC/DSO tar (Basalt, ORB-SLAM3, and ground truth) — calibrated, 512x512
+wget -c "http://vision.in.tum.de/tumvi/exported/euroc/512_16/dataset-corridor4_512_16.tar" -P euroc/
+tar -xf euroc/dataset-corridor4_512_16.tar -C euroc/
 ```
 
-Approximate sizes (bag / tar): corridor1 ≈ 5.9GB / 3.3GB, corridor2 ≈ 6.6GB / 3.7GB, corridor3 ≈ 5.7GB / 3.2GB, corridor4 ≈ 1.9GB / 1.1GB, corridor5 ≈ 5.8GB / 3.2GB. corridor4 is the shortest sequence and the cheapest one to sanity-check your pipeline on first.
+~1.9GB (bag) + ~1.1GB (tar). If a URL 404s, grab the current link from the [official download page](https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset) — filenames stay `dataset-corridor4_512_16.{bag,tar}`.
 
-If a URL 404s (TUM occasionally moves things between `vision.in.tum.de` and `cdn3.vision.in.tum.de`), grab the current link from the [official download page](https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset) — the file naming (`dataset-corridorN_512_16.{bag,tar}`) stays the same.
-
-After extraction you should have, per sequence:
 ```
-euroc/dataset-corridor1_512_16/mav0/
+data/tumvi/euroc/dataset-corridor4_512_16/mav0/
   cam0/{data/*.png, data.csv, sensor.yaml}
   cam1/{data/*.png, data.csv, sensor.yaml}
   imu0/{data.csv, sensor.yaml}
@@ -56,283 +56,263 @@ euroc/dataset-corridor1_512_16/mav0/
 
 ---
 
-## 2. OpenVINS: build and run
+## 2. OpenVINS: build and run (ROS 2 Jazzy)
 
-### 2.1 Build (ROS 2)
+### 2.1 Build
 
 ```bash
-sudo apt install ros-jazzy-desktop python3-colcon-common-extensions libeigen3-dev libboost-all-dev libceres-dev 
+sudo apt install ros-jazzy-desktop python3-colcon-common-extensions libeigen3-dev libboost-all-dev libceres-dev
 mkdir -p ~/ros2_ws_ov/src && cd ~/ros2_ws_ov/src
 git clone https://github.com/rpng/open_vins/
 ```
 
-Safely handle .h imports in OpenVINS, since ROS 2 Jazzy uses .hpp imports.
+OpenVINS's headers predate ROS 2 Jazzy's switch to `.hpp` includes for several packages — patch conditionally rather than hard-switching, so the same tree still builds on older ROS 2 distros too:
+
 ```bash
 cd ~/ros2_ws_ov
 
-# 1. Fix image_transport.h -> conditional .hpp/.h
+# 1. image_transport.h -> conditional .hpp/.h
 find src/open_vins/ -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i \
   's|#include <image_transport/image_transport.h>|#if __has_include(<image_transport/image_transport.hpp>)\n#include <image_transport/image_transport.hpp>\n#else\n#include <image_transport/image_transport.h>\n#endif|g' {} +
 
-# 2. Fix tf2_geometry_msgs.h -> conditional .hpp/.h
+# 2. tf2_geometry_msgs.h -> conditional .hpp/.h
 find src/open_vins/ -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i \
   's|#include <tf2_geometry_msgs/tf2_geometry_msgs.h>|#if __has_include(<tf2_geometry_msgs/tf2_geometry_msgs.hpp>)\n#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>\n#else\n#include <tf2_geometry_msgs/tf2_geometry_msgs.h>\n#endif|g' {} +
 
-# 3. Fix cv_bridge.h -> conditional .hpp/.h
+# 3. cv_bridge.h -> conditional .hpp/.h
 find src/open_vins/ -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i \
   's|#include <cv_bridge/cv_bridge.h>|#if __has_include(<cv_bridge/cv_bridge.hpp>)\n#include <cv_bridge/cv_bridge.hpp>\n#else\n#include <cv_bridge/cv_bridge.h>\n#endif|g' {} +
 
-# Build OpenVins
-cd ~/ros2_ws_ov && colcon build --symlink-install
+colcon build --symlink-install
 source install/setup.bash
 ```
 
-OpenVINS already ships a verified `tum_vi` config (`config/tum_vi/estimator_config.yaml` + Kalibr-format IMU/camera chain files), so you don't need to recalibrate anything — just point the launch file at it.
+OpenVINS already ships a verified `tum_vi` config (`config/tum_vi/estimator_config.yaml` + Kalibr-format IMU/camera chain files) — no recalibration needed.
 
----
+### 2.2 Run inference + record output
 
-### 2.2 Run inference + record output in one shot
+Convert the bag once:
 
-First, convert ROS 1 bag into ROS 2 format.
 ```bash
-# Install the conversion tool
+BASE=~/code/vio_validation_harness
 pip3 install rosbags
-
-# Convert the downloaded ROS 1 bag to a ROS 2 bag format
-rosbags-convert --src bags/dataset-corridor4_512_16.bag --dst bags/dataset-corridor4_512_16_ros2
+rosbags-convert --src "$BASE"/data/tumvi/bags/dataset-corridor4_512_16.bag \
+                --dst "$BASE"/data/tumvi/bags/dataset-corridor4_512_16_ros2
 ```
 
-Add a recorder node so the estimate is written straight to a TUM-formatted text file (this is the key step for the "unified output" requirement — see §4). 
-
-*Note: Because the `ov_eval` package's `pose_to_file` utility is not fully ported to ROS 2 yet, we use a custom Python script (`scripts/record_poses_openvins.py`) to record the output without compilation errors.*
+*Note: `ov_eval`'s `pose_to_file` isn't fully ported to ROS 2 yet, so `scripts/record_poses_openvins.py` stands in for it — same TUM-format output, no compilation errors.*
 
 ```bash
-mkdir -p ~/code/vio_validation_harness/results/openvins
+mkdir -p "$BASE"/results/openvins
 
-# terminal 1 — visualize live (leave this open permanently)
+# terminal 1 — visualize live (leave open)
 rviz2 -d $(ros2 pkg prefix ov_msckf)/share/ov_msckf/launch/display_ros2.rviz
 
-# terminal 2 — launch the estimator in the background
+# terminal 2 — launch the estimator, then record
 ros2 launch ov_msckf subscribe.launch.py config:=tum_vi &
+python3 "$BASE"/scripts/record_poses_openvins.py "$BASE"/results/openvins/corridor4.txt &
 
-# terminal 2 (cont.) — record /ov_msckf/poseimu to file
-python3 ~/code/vio_validation_harness/scripts/record_poses_openvins.py \
-  ~/code/vio_validation_harness/results/openvins/corridor4.txt &
-
-# terminal 3 — feed the bag (ROS 2 bag directories do not use extensions)
-ros2 bag play ~/code/vio_validation_harness/data/tumvi/bags/dataset-corridor4_512_16_ros2
+# terminal 3 — feed the bag (ROS 2 bag dirs have no extension)
+ros2 bag play "$BASE"/data/tumvi/bags/dataset-corridor4_512_16_ros2
 ```
 
-A bash script to automate the above can be found at `~/code/vio_validation_harness/run_eval_openvins.sh`. Note that this script only runs the estimator and bag, rviz still needs to be launched separately in another terminal to avoid glitching.
+`run_eval_openvins.sh` (already in your repo) automates terminals 2–3; rviz still needs its own terminal to avoid glitching.
 
-The `record_poses_openvins.py` script automatically writes `time(s) px py pz qx qy qz qw` — this is standard TUM trajectory format, meaning no conversion is needed later for evaluation.
+`record_poses_openvins.py` writes `time(s) px py pz qx qy qz qw` — TUM format natively, no conversion needed.
 
 ---
 
-## 3. Kimera-VIO: build and run
+## 3. Basalt: install and run
 
-### 3.1 Build (Ubuntu 20.04 with Docker, no ROS required)
-
-```bash
-mkdir -p kimera_ws && cd kimera_ws
-
-# Clone the repo
-git clone git@github.com:MIT-SPARK/Kimera-VIO.git Kimera-VIO
-
-# Build the image
-cd Kimera-VIO
-docker build --rm -t kimera_vio -f ./scripts/docker/Dockerfile . 
-```
-
-### 3.2 Create a `TumVi` params folder — required, don't skip
-
-Kimera-VIO ships parameter folders for EuRoC only. TUM-VI's cameras are **fisheye (equidistant distortion)**, not the pinhole-radtan model EuRoC uses, so running the default `Euroc` params against TUM-VI data will silently produce garbage or fail frontend tracking. You need a `params/TumVi/` folder with `LeftCameraParams.yaml`, `RightCameraParams.yaml`, and `ImuParams.yaml`.
-
-Populate it from either (a) `mav0/cam0/sensor.yaml` / `mav0/cam1/sensor.yaml` / `mav0/imu0/sensor.yaml` shipped inside the tar you just extracted, or (b) the pre-verified calibration OpenVINS already ships at `open_vins/config/tum_vi/kalibr_imucam_chain.yaml` and `kalibr_imu_chain.yaml` — same sensor rig, already vetted, so reusing it avoids re-deriving intrinsics yourself.
-
-Key fields to set per camera (Kimera-VIO's supported distortion models are `radtan` and `equidistant`):
-
-```yaml
-%YAML:1.0
-camera_id: cam0
-distortion_model: equidistant
-intrinsics: [fx, fy, cx, cy]          # from sensor.yaml intrinsics
-distortion_coefficients: [k1, k2, k3, k4]
-resolution: [512, 512]
-T_BS: !!opencv-matrix                 # camera-to-IMU extrinsic, 4x4
-  rows: 4
-  cols: 4
-  dt: d
-  data: [ ... ]
-rate_hz: 20
-```
-
-And for the IMU, use TUM-VI's published noise values (200 Hz):
-
-```yaml
-gyroscope_noise_density: 0.00016
-gyroscope_random_walk: 0.000022
-accelerometer_noise_density: 0.0028
-accelerometer_random_walk: 0.00086
-imu_rate: 200
-```
-
-Copy `params/Euroc/*.yaml` as your starting templates and only edit the camera/IMU-specific fields above — the frontend/backend tracker tuning parameters can stay at their default Euroc values as a first pass.
-
-### 3.3 Run inference
-
-Open `scripts/docker/kimera_vio_docker.bash` in an editor — it's a `docker run` wrapper with a set of `--volume` lines you edit directly, per the hint in the repo docs. You need **three** mounts, not just the one dataset volume the docs example shows:
+### 3.1 Install
 
 ```bash
-# 1. the TUM-VI sequence (read-only is fine)
---volume="$HOME/data/tumvi/euroc/dataset-corridor1_512_16:/data/tumvi/corridor1" \
-
-# 2. your custom TumVi params folder
---volume="$HOME/kimera_params/TumVi:/root/Kimera-VIO/params/TumVi" \
-
-# 3. an output folder on the host, so results survive after the container exits
---volume="$HOME/results/kimera/corridor1:/root/Kimera-VIO/output_logs" \
+curl -LsSf https://gitlab.com/VladyslavUsenko/basalt/-/raw/master/scripts/install.sh | sh
 ```
 
-The script's default invocation runs the built-in EuRoC example — you also need to change whatever `--dataset_path` / `--params_folder_path` arguments it passes to `stereoVIOEuroc` (or the equivalent bash wrapper it calls internally) so they point at the **container-side** paths from your mounts above (`/data/tumvi/corridor1` and `/root/Kimera-VIO/params/TumVi`), not the EuRoC example paths. Since you have the actual script open, match your edits to whatever variable names it uses — the docs snippet you quoted only shows the volume-mount pattern, not the full flag list, so treat the container paths above as what to plug into the existing `-p` / `--dataset_path` / `--params_folder_path` arguments already in the script.
-
-Also add `--log_output=true` (or whatever flag/variable the script exposes for it) so `traj_vio.csv` actually gets written to `output_logs/` inside the container — and therefore, via the volume mount, to `~/results/kimera/corridor1/traj_vio.csv` on your host.
-
-Run it once per sequence, swapping the dataset volume and output volume each time:
+Places binaries in `~/.local/bin` and calibration/config data in `~/.local/etc/basalt/`. Two things this needs that aren't automatic:
 
 ```bash
-for i in 1 2 3 4 5; do
-  mkdir -p ~/results/kimera/corridor${i}
-  # edit the two volume lines above to point at corridor${i}, then:
-  ./scripts/docker/kimera_vio_docker.bash
-done
+# 1. put the installer's binaries on PATH
+echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
+
+# 2. libbasalt.so isn't found at runtime without this
+echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/shri/.local/lib/' >> ~/.bashrc
+
+source ~/.bashrc
 ```
 
-Kimera's real-time Pangolin/OpenCV 3D viewer runs inside the container by default — if you're on a remote/headless machine and the window doesn't appear, you likely need `xhost +local:root` on the host first and a `--volume="/tmp/.X11-unix:/tmp/.X11-unix:rw"` + `--env="DISPLAY"` pair in the script (the Kimera-VIO team's own docs use exactly this X11-forwarding pattern for GUI apps in their containers). Run `xhost -local:root` again once you're done, since leaving it open lets any local process draw on your display.
+No custom params folder, no calibration conversion — TUM-VI's `tumvi_512_ds_calib.json` (double-sphere camera model, built for fisheye rigs like this one) and `tumvi_512_config.json` are already shipped.
 
-### 3.4 Output
+### 3.2 Run inference
 
-Same as a source build: `output_logs/traj_vio.csv`, header `#timestamp,x,y,z,qw,qx,qy,qz,vx,vy,vz,bgx,bgy,bgz,bax,bay,baz` — quaternion is `qw`-first here, unlike the TUM target schema, so it still needs the conversion step below.
+```bash
+BASE=~/code/vio_validation_harness
+CALIB=~/.local/etc/basalt/tumvi_512_ds_calib.json
+CONFIG=~/.local/etc/basalt/tumvi_512_config.json
+
+mkdir -p "$BASE"/results/basalt/corridor4
+cd "$BASE"/results/basalt/corridor4   # basalt_vio writes trajectory.txt to the CWD
+
+basalt_vio \
+  --dataset-path "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/ \
+  --dataset-type euroc \
+  --cam-calib "$CALIB" \
+  --config-path "$CONFIG" \
+  --marg-data corridor4_marg_data \
+  --show-gui 1 \
+  --save-trajectory tum \
+  --save-groundtruth 1 \
+  --result-path corridor4_ate.txt
+```
+
+- `--show-gui 1` opens Basalt's Pangolin viewer — drop to `0` if you want headless.
+- `--save-trajectory tum` writes `trajectory.txt` into the current directory (this is why we `cd` first — it's not a path argument).
+- `--save-groundtruth 1` also writes `groundtruth.txt` from the same `mocap0` data, as a second cross-check source.
+- `--result-path` makes Basalt compute its own RMSE ATE directly.
+
+### 3.3 Output
+
+```
+results/basalt/corridor4/
+  trajectory.txt        # timestamp tx ty tz qx qy qz qw
+  groundtruth.txt
+  corridor4_ate.txt
+  corridor4_marg_data/
+```
 
 ---
 
-## 4. Normalize everything into one schema
+## 4. ORB-SLAM3: install and run
 
-Downstream trajectory-evaluation pipelines (and `evo`, the standard tool for this) expect the **TUM trajectory format**: a whitespace-separated text file, one pose per line, sorted by ascending timestamp:
+Unlike OpenVINS, this uses ORB-SLAM3's **standalone TUM-VI example binary** (not a ROS node), so none of the ROS 2 Jazzy header-compatibility work from §2 applies here — it's a plain CMake build.
 
-```
-# timestamp tx ty tz qx qy qz qw
-1520531212.143128 0.0123 -0.0451 0.0091 0.0012 0.0034 -0.0002 0.9999
-```
-
-- Timestamp: seconds (float), same epoch as the dataset
-- Position: meters, in the world/IMU frame
-- Quaternion: `x y z w` order (scalar-last)
-
-OpenVINS's `pose_to_file` output is already in this format — no conversion needed.
-
-### 4.1 Convert ground truth (once per sequence, shared by both systems)
-
-`evo` reads EuRoC ground-truth CSVs natively and can save straight to TUM format:
+### 4.1 Install
 
 ```bash
-pip install evo --upgrade --no-binary evo
-mkdir -p ~/code/vio_validation_harness/results/gt
-for i in 1 2 3 4 5; do
-  # Extract ground truth to a temporary file
-  evo_traj euroc ~/code/vio_validation_harness/data/tumvi/euroc/dataset-corridor${i}_512_16/mav0/mocap0/data.csv --save_as_tum
-  # Move it into your results directory structure
-  mv data.tum ~/code/vio_validation_harness/results/gt/corridor${i}.txt
-  cd ~/code/vio_validation_harness/results
-  # Clean the Ground Truth file
-  python tum_convert_ov.py gt/corridor${i}.txt gt/corridor${i}_clean.txt
-  # Clean the OpenVINS output file
-  python tum_convert_ov.py openvins/corridor${i}.txt openvins/corridor${i}_clean.txt
-done
+sudo apt install libeigen3-dev libopencv-dev libboost-all-dev libssl-dev
+
+mkdir -p orbslam3_ws && cd orbslam3_ws
+# Pangolin (not reliably apt-packaged — build from source)
+git clone --recursive https://github.com/stevenlovegrove/Pangolin.git
+cd Pangolin && ./scripts/install_prerequisites.sh recommended
+cmake -B build && cmake --build build -j$(nproc)
+sudo cmake --build build --target install
+
+# ORB-SLAM3
+cd ~/code/vio_validation_harness/orbslam3_ws
+git clone https://github.com/UZ-SLAMLab/ORB_SLAM3.git
+cd ORB_SLAM3
 ```
 
-Because `corridor` sequences only have ground truth at the start/end, this file will have two disjoint time ranges — that's expected, and `evo` handles it fine via timestamp association.
-
-### 4.2 Convert Kimera-VIO's `traj_vio.csv` → TUM
-
-```python
-# tum_convert_kimera.py
-import csv, sys
-
-src, dst = sys.argv[1], sys.argv[2]
-with open(src) as f_in, open(dst, "w") as f_out:
-    reader = csv.reader(f_in)
-    header = next(reader)
-    for row in reader:
-        ts_ns, x, y, z, qw, qx, qy, qz = row[:8]
-        t_s = float(ts_ns) * 1e-9
-        f_out.write(f"{t_s:.9f} {x} {y} {z} {qx} {qy} {qz} {qw}\n")
-```
+ORB-SLAM3's `CMakeLists.txt` still targets C++11, which fails to compile against a lot of current toolchains (very likely to bite on the same Ubuntu 24.04 install where OpenVINS needed the `.hpp` patching in §2) — bump it to C++14 before building:
 
 ```bash
-for i in 1 2 3 4 5; do
-  python3 tum_convert_kimera.py \
-    ~/results/kimera/corridor${i}/traj_vio.csv \
-    ~/results/kimera/corridor${i}/corridor${i}.txt
-done
+sed -i 's/++11/++14/g' CMakeLists.txt
+chmod +x build.sh
+./build.sh
 ```
 
-### 4.3 Final layout
+If it fails on `#include <Eigen/...>` not being found, that's a known issue on newer Ubuntu Eigen packaging — swap those includes for `#include <eigen3/Eigen/...>` in the file(s) the compiler flags and rebuild.
+
+This produces `lib/libORB_SLAM3.so` and the example binaries under `Examples/`.
+
+### 4.2 Run inference
+
+ORB-SLAM3 ships everything TUM-VI-specific already — settings YAML, per-sequence timestamp files, and IMU association files — no calibration work needed, same as Basalt:
+
+```bash
+BASE=~/code/vio_validation_harness
+cd "$BASE"/orbslam3_ws/ORB_SLAM3
+mkdir -p "$BASE"/results/orbslam3/corridor4
+cd "$BASE"/results/orbslam3/corridor4   # output files land in the CWD
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/code/vio_validation_harness/orbslam3_ws/Pangolin/build/
+
+"$BASE"/orbslam3_ws/ORB_SLAM3/Examples/Stereo-Inertial/stereo_inertial_tum_vi \
+  "$BASE"/orbslam3_ws/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+  "$BASE"/orbslam3_ws/ORB_SLAM3/Examples/Stereo-Inertial/TUM-VI.yaml \
+  "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/mav0/cam0/data \
+  "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/mav0/cam1/data \
+  "$BASE"/orbslam3_ws/ORB_SLAM3/Examples/Stereo-Inertial/TUM_TimeStamps/dataset-corridor4_512.txt \
+  "$BASE"/orbslam3_ws/ORB_SLAM3/Examples/Stereo-Inertial/TUM_IMU/dataset-corridor4_512.txt \
+  corridor4_stereoi
+
+# Post-process the results file to scale the timestamps from nanoseconds down to seconds
+gawk -i inplace '{
+    if ($0 ~ /^#/ || NF == 0) {
+        print
+    } else {
+        printf "%.9f", $1 / 1000000000
+        for(i=2; i<=NF; i++) printf " %s", $i
+        print ""
+    }
+}' "$BASE"/results/orbslam3/corridor4/f_corridor4_stereoi.txt
+```
+
+Stereo-Inertial to match OpenVINS's and Basalt's stereo+IMU configuration — parity across all three for the comparison.
+
+### 4.3 Output
+
+The last argument (`corridor4_stereoi`) is a filename prefix, not a full path. ORB-SLAM3 writes, into the current directory:
 
 ```
-results/
-  gt/
-    corridor1.txt  corridor2.txt  ...  corridor5.txt
-  openvins/
-    corridor1.txt  corridor2.txt  ...  corridor5.txt
-  kimera/
-    corridor1/corridor1.txt   (+ traj_vio.csv, mesh, logs alongside)
-    corridor2/corridor2.txt
-    ...
+results/orbslam3/corridor4/
+  f_corridor4_stereoi.txt     # full per-frame trajectory, TUM format, Timestamps in seconds — use this one
+  kf_corridor4_stereoi.txt    # keyframes only, sparser
 ```
 
-All nine trajectory files (5 GT + 5 OpenVINS... adjust per how many sequences you actually ran) now share the identical `timestamp tx ty tz qx qy qz qw` schema — this is what you hand to a downstream validator.
+Both are already `timestamp tx ty tz qx qy qz qw` — no conversion needed. Use `f_corridor4_stereoi.txt` for parity with OpenVINS/Basalt's per-frame output.
+
+**Ground truth caveat is stronger here than for the other two**: since ORB-SLAM3 does full SLAM (loop closure, relocalization, map reuse) rather than pure odometry, and corridor4's ground truth only covers the start/end, the ATE you get is really measuring accumulated drift over the whole run, not a true full-trajectory error — same caveat as OpenVINS/Basalt, just worth being extra aware of here since ORB-SLAM3's loop closure won't have anything to close against mid-sequence.
 
 ---
 
 ## 5. Visualize and validate with `evo`
 
 ```bash
-# Plot estimate vs ground truth for one sequence
-evo_traj tum \
-  results/openvins/corridor4_clean.txt \
-  results/kimera/corridor4/corridor4_clean.txt \
-  --ref results/gt/corridor4_clean.txt \
-  -a --plot_mode xyz --save_plot results/corridor4_traj.pdf
+BASE=~/code/vio_validation_harness
+pip install evo --upgrade --no-binary evo
+mkdir -p "$BASE"/results/gt
 
-# Quantitative validation: Absolute Trajectory Error against ground truth
+evo_traj euroc "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/mav0/mocap0/data.csv --save_as_tum
+mv data.tum "$BASE"/results/gt/corridor4.txt
+```
+
+Overlay all three against ground truth:
+
+```bash
+cd "$BASE"
+evo_traj tum \
+  results/openvins/corridor4.txt \
+  results/basalt/corridor4/trajectory.txt \
+  results/orbslam3/corridor4/f_corridor4_stereoi.txt \
+  --ref results/gt/corridor4.txt \
+  -a --plot_mode xyz --save_plot results/corridor4_traj.pdf
+```
+
+Quantitative ATE, one per system:
+
+```bash
 evo_ape tum results/gt/corridor4.txt results/openvins/corridor4.txt \
   -a --save_results results/openvins_corridor4_ape.zip
 
-evo_ape tum results/gt/corridor4.txt results/kimera/corridor4/corridor4.txt \
-  -a --save_results results/kimera_corridor4_ape.zip
+evo_ape tum results/gt/corridor4.txt results/basalt/corridor4/trajectory.txt \
+  -a --save_results results/basalt_corridor4_ape.zip
+
+evo_ape tum results/gt/corridor4.txt results/orbslam3/corridor4/f_corridor4_stereoi.txt \
+  -a --save_results results/orbslam3_corridor4_ape.zip
 ```
 
-`-a` triggers Umeyama SE(3) alignment, appropriate here since GT only covers the start/end segments. `evo_ape`'s `--save_results` output is a self-contained zip with the full per-timestamp error series and summary stats (RMSE, mean, median, std) in JSON — a convenient, already-structured artifact if your test pipeline wants machine-readable metrics rather than raw trajectories.
-
-For a batch run across all five sequences and both systems:
-
-```bash
-for i in 1 2 3 4 5; do
-  for sys in openvins kimera; do
-    src=results/${sys}/corridor${i}.txt
-    [ "$sys" = kimera ] && src=results/kimera/corridor${i}/corridor${i}.txt
-    evo_ape tum results/gt/corridor${i}.txt "$src" -a \
-      --save_results results/${sys}_corridor${i}_ape.zip
-  done
-done
-```
+`--save_results` zips are self-contained JSON+data (ATE RMSE/mean/median/std) — ready for a downstream validator.
 
 ---
 
 ## Common pitfalls
 
-- **Skipping the TumVi params folder for Kimera-VIO**: running with default `Euroc` params against TUM-VI's fisheye images will not error loudly — it'll just track poorly. Confirm `distortion_model: equidistant` is set.
-- **Quaternion order mismatches**: EuRoC/Kimera raw outputs are `qw` first; the TUM/evo target schema is `qw` last. Double check any custom conversion script.
-- **Re-initializing OpenVINS between bags**: reuse of a `subscribe.launch` process across multiple `rosbag play` runs without restarting the estimator will corrupt the second trajectory — always relaunch per sequence.
-- **corridor sequences have no full ground truth**: don't expect an ATE over the entire trajectory length; `evo` will only score the overlapping (start/end) timestamps, which is expected for this sequence family.
+- **OpenVINS ROS 2 header mismatches**: the conditional `.hpp`/`.h` patch in §2.1 covers the packages known to trip this up; if colcon fails on a different header, the same `#if __has_include(...)` pattern applies.
+- **Basalt `libbasalt.so` not found**: the installer places it in `~/.local/lib`, which isn't on the loader path by default — the `LD_LIBRARY_PATH` export in §3.1 fixes it. Symptom without it: `basalt_vio: error while loading shared libraries: libbasalt.so.x: cannot open shared object file`.
+- **Basalt `--save-trajectory tum` writes to the CWD, not a path**: forgetting to `cd` into the per-run output folder first means `trajectory.txt` lands wherever you happened to run the command from.
+- **ORB-SLAM3 C++11 build failures**: extremely common on any reasonably current toolchain — the `sed -i 's/++11/++14/g' CMakeLists.txt` step in §4.1 is close to mandatory, not optional, on Ubuntu 24.04.
+- **ORB-SLAM3 output prefix confusion**: the final CLI argument is a filename prefix, not a path — files always land in the CWD, hence `cd`-ing into the results folder first in §4.2.
+- **corridor4 ground truth is partial**: all three systems' ATE only reflects the overlapping start/end timestamps — expected for this sequence family, not a bug in any of the three.
