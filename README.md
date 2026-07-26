@@ -103,20 +103,18 @@ rosbags-convert --src "$BASE"/data/tumvi/bags/dataset-corridor4_512_16.bag \
 *Note: `ov_eval`'s `pose_to_file` isn't fully ported to ROS 2 yet, so `scripts/record_poses_openvins.py` stands in for it — same TUM-format output, no compilation errors.*
 
 ```bash
-mkdir -p "$BASE"/results/openvins
+mkdir -p "$BASE"/results/openvins/corridor4
 
 # terminal 1 — visualize live (leave open)
 rviz2 -d $(ros2 pkg prefix ov_msckf)/share/ov_msckf/launch/display_ros2.rviz
 
 # terminal 2 — launch the estimator, then record
 ros2 launch ov_msckf subscribe.launch.py config:=tum_vi &
-python3 "$BASE"/scripts/record_poses_openvins.py "$BASE"/results/openvins/corridor4.txt &
+python3 "$BASE"/scripts/record_poses_openvins.py "$BASE"/results/openvins/corridor4/trajectory_openvins.txt &
 
 # terminal 3 — feed the bag (ROS 2 bag dirs have no extension)
 ros2 bag play "$BASE"/data/tumvi/bags/dataset-corridor4_512_16_ros2
 ```
-
-`run_eval_openvins.sh` (already in your repo) automates terminals 2–3; rviz still needs its own terminal to avoid glitching.
 
 `record_poses_openvins.py` writes `time(s) px py pz qx qy qz qw` — TUM format natively, no conversion needed.
 
@@ -164,6 +162,9 @@ basalt_vio \
   --save-trajectory tum \
   --save-groundtruth 1 \
   --result-path corridor4_ate.txt
+
+# Rename file for clarity
+mv trajectory.txt trajectory_basalt.txt
 ```
 
 - `--show-gui 1` opens Basalt's Pangolin viewer — drop to `0` if you want headless.
@@ -175,7 +176,7 @@ basalt_vio \
 
 ```
 results/basalt/corridor4/
-  trajectory.txt        # timestamp tx ty tz qx qy qz qw
+  trajectory_basalt.txt        # timestamp tx ty tz qx qy qz qw
   groundtruth.txt
   corridor4_ate.txt
   corridor4_marg_data/
@@ -239,15 +240,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/code/vio_validation_harness/orbslam3_w
   corridor4_stereoi
 
 # Post-process the results file to scale the timestamps from nanoseconds down to seconds
-gawk -i inplace '{
-    if ($0 ~ /^#/ || NF == 0) {
-        print
-    } else {
-        printf "%.9f", $1 / 1000000000
-        for(i=2; i<=NF; i++) printf " %s", $i
-        print ""
-    }
-}' "$BASE"/results/orbslam3/corridor4/f_corridor4_stereoi.txt
+awk '{printf "%.9f", $1 / 1000000000; for(i=2; i<=NF; i++) printf " %s", $i; print ""}' f_corridor4_stereoi.txt > trajectory_orbslam3.txt
 ```
 
 Stereo-Inertial to match OpenVINS's and Basalt's stereo+IMU configuration — parity across all three for the comparison.
@@ -258,7 +251,8 @@ The last argument (`corridor4_stereoi`) is a filename prefix, not a full path. O
 
 ```
 results/orbslam3/corridor4/
-  f_corridor4_stereoi.txt     # full per-frame trajectory, TUM format, Timestamps in seconds — use this one
+  f_corridor4_stereoi.txt     # full per-frame trajectory, TUM format
+  trajectort_orbslam3.txt     # full per-frame trajectory, TUM format, Timestamps in seconds — use this one
   kf_corridor4_stereoi.txt    # keyframes only, sparser
 ```
 
@@ -276,7 +270,7 @@ pip install evo --upgrade --no-binary evo
 mkdir -p "$BASE"/results/gt
 
 evo_traj euroc "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/mav0/mocap0/data.csv --save_as_tum
-mv data.tum "$BASE"/results/gt/corridor4.txt
+mv data.tum "$BASE"/results/gt/trajectory_ground_truth.txt
 ```
 
 Overlay all three against ground truth:
@@ -284,23 +278,23 @@ Overlay all three against ground truth:
 ```bash
 cd "$BASE"
 evo_traj tum \
-  results/openvins/corridor4.txt \
-  results/basalt/corridor4/trajectory.txt \
-  results/orbslam3/corridor4/f_corridor4_stereoi.txt \
-  --ref results/gt/corridor4.txt \
-  -a --plot_mode xyz --save_plot results/corridor4_traj.pdf
+  results/openvins/corridor4/trajectory_openvins.txt \
+  results/basalt/corridor4/trajectory_basalt.txt \
+  results/orbslam3/corridor4/trajectory_orbslam3.txt \
+  --ref results/gt/trajectory_ground_truth.txt \
+  -a --plot_mode xyz --save_plot results/corridor4_traj_comparison.pdf
 ```
 
 Quantitative ATE, one per system:
 
 ```bash
-evo_ape tum results/gt/corridor4.txt results/openvins/corridor4.txt \
+evo_ape tum results/gt/trajectory_ground_truth.txt results/openvins/corridor4/trajectory_openvins.txt \
   -a --save_results results/openvins_corridor4_ape.zip
 
-evo_ape tum results/gt/corridor4.txt results/basalt/corridor4/trajectory.txt \
+evo_ape tum results/gt/trajectory_ground_truth.txt results/basalt/corridor4/trajectory_basalt.txt \
   -a --save_results results/basalt_corridor4_ape.zip
 
-evo_ape tum results/gt/corridor4.txt results/orbslam3/corridor4/f_corridor4_stereoi.txt \
+evo_ape tum results/gt/trajectory_ground_truth.txt results/orbslam3/corridor4/trajectory_orbslam3.txt \
   -a --save_results results/orbslam3_corridor4_ape.zip
 ```
 
