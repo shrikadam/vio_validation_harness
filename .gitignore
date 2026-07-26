@@ -1,4 +1,6 @@
 .venv
+__pycache__
 data
 ros2_ws_ov
 orbslam3_ws
+*.egg-info

@@ -7,7 +7,7 @@ Three systems, two paradigms:
 | | OpenVINS | Basalt | ORB-SLAM3 |
 |---|---|---|---|
 | Paradigm | EKF (MSCKF) | Sliding-window nonlinear optimization + marginalization | Keyframe bundle adjustment + loop closure / relocalization |
-| TUM-VI calibration | ships a verified `tum_vi` config | ships `tumvi_512_ds_calib.json` / `tumvi_512_config.json` | ships `TUM_512.yaml` + timestamp/IMU association files |
+| TUM-VI calibration | ships a verified `tum_vi` config | ships `tumvi_512_ds_calib.json` / `tumvi_512_config.json` | ships `TUM-VI.yaml` + timestamp/IMU association files |
 | Install | ROS 2 Jazzy + colcon | one-line installer script | plain CMake build, no ROS needed |
 | Output format | TUM, native | TUM, native | TUM, native |
 | Dataset input | ROS 2 bag | EuRoC/DSO tar folder | EuRoC/DSO tar folder |
@@ -267,10 +267,10 @@ Both are already `timestamp tx ty tz qx qy qz qw` — no conversion needed. Use 
 ```bash
 BASE=~/code/vio_validation_harness
 pip install evo --upgrade --no-binary evo
-mkdir -p "$BASE"/results/gt
+mkdir -p "$BASE"/results/gt/corridor4
 
 evo_traj euroc "$BASE"/data/tumvi/euroc/dataset-corridor4_512_16/mav0/mocap0/data.csv --save_as_tum
-mv data.tum "$BASE"/results/gt/trajectory_ground_truth.txt
+mv data.tum "$BASE"/results/gt/corridor4/trajectory_ground_truth.txt
 ```
 
 Overlay all three against ground truth:
@@ -281,20 +281,20 @@ evo_traj tum \
   results/openvins/corridor4/trajectory_openvins.txt \
   results/basalt/corridor4/trajectory_basalt.txt \
   results/orbslam3/corridor4/trajectory_orbslam3.txt \
-  --ref results/gt/trajectory_ground_truth.txt \
+  --ref results/gt/corridor4/trajectory_ground_truth.txt \
   -a --plot_mode xyz --save_plot results/corridor4_traj_comparison.pdf
 ```
 
 Quantitative ATE, one per system:
 
 ```bash
-evo_ape tum results/gt/trajectory_ground_truth.txt results/openvins/corridor4/trajectory_openvins.txt \
+evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/openvins/corridor4/trajectory_openvins.txt \
   -a --save_results results/openvins_corridor4_ape.zip
 
-evo_ape tum results/gt/trajectory_ground_truth.txt results/basalt/corridor4/trajectory_basalt.txt \
+evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/basalt/corridor4/trajectory_basalt.txt \
   -a --save_results results/basalt_corridor4_ape.zip
 
-evo_ape tum results/gt/trajectory_ground_truth.txt results/orbslam3/corridor4/trajectory_orbslam3.txt \
+evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/orbslam3/corridor4/trajectory_orbslam3.txt \
   -a --save_results results/orbslam3_corridor4_ape.zip
 ```
 

@@ -7,17 +7,24 @@ from vio_harness.evaluation.alignment import TrajectoryProcessor
 from vio_harness.evaluation.ate_metric import ATEStrategy
 from vio_harness.evaluation.rpe_metric import TranslationalRPEStrategy
 
+import pandas as pd
+
 def main():
     # 1. Define paths to your real data
-    gt_path = Path("dataset/tum_vi/room1_ground_truth.txt")
-    est_path = Path("dataset/tum_vi/openvins_output.csv")
-    
+    gt_path = Path("results/gt/corridor4/trajectory_ground_truth.txt")
+    est_path = Path("results/openvins/corridor4/trajectory_openvins.txt")
+    est_csv_path = Path("results/openvins/corridor4/trajectory_openvins.csv")
+
+    df = pd.read_csv(est_path, sep=r"\s+", comment="#", header=None)
+    df.columns = ["timestamp", "px", "py", "pz", "qx", "qy", "qz", "qw"]
+    df.to_csv(est_csv_path, index=False)
+
     print("--- 1. Ingesting Real Data ---")
     gt_parser = TUMParser()
     ov_parser = OpenVINSParser()
     
     gt_data = gt_parser.parse(gt_path)
-    est_data = ov_parser.parse(est_path)
+    est_data = ov_parser.parse(est_csv_path)
     print(f"Loaded Ground Truth: {len(gt_data.timestamps)} poses")
     print(f"Loaded OpenVINS Estimate: {len(est_data.timestamps)} poses")
     
