@@ -1,7 +1,7 @@
 # src/vio_harness/evaluation/base_metric.py
 
 import abc
-from vio_harness.models.trajectory import TrajectoryData
+from vio_harness.ingestion.base_parser import TrajectoryData
 
 class MetricStrategy(abc.ABC):
     """

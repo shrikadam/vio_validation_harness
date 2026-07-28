@@ -3,8 +3,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from vio_harness.ingestion.base_parser import TrajectoryParser
-from vio_harness.models.trajectory import TrajectoryData
+from vio_harness.ingestion.base_parser import TrajectoryData, TrajectoryParser
 
 class TUMParser(TrajectoryParser):
     """

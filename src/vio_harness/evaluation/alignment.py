@@ -4,39 +4,53 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
 from scipy.interpolate import interp1d
-from vio_harness.models.trajectory import TrajectoryData
+from vio_harness.ingestion.base_parser import TrajectoryData
 
 class TrajectoryProcessor:
     """Handles temporal synchronization and spatial alignment of trajectories."""
 
     @staticmethod
-    def synchronize_trajectories(gt: TrajectoryData, est: TrajectoryData) -> tuple[TrajectoryData, TrajectoryData]:
+    def synchronize_trajectories(
+        gt: TrajectoryData, est: TrajectoryData, max_diff_sec: float = 0.01
+    ) -> tuple[TrajectoryData, TrajectoryData]:
+        """Synchronize trajectories by matching nearest timestamps within max_diff_sec.
+
+        Rejects estimates that fall in ground-truth data gaps.
         """
-        Interpolates the Ground Truth (GT) to match the timestamps of the Estimate (EST).
-        Uses Linear Interpolation for translation and SLERP for quaternions.
-        """
-        # Find the overlapping time window
-        start_time = max(gt.timestamps[0], est.timestamps[0])
-        end_time = min(gt.timestamps[-1], est.timestamps[-1])
-        
-        # Mask the estimated trajectory to the valid overlapping window
-        valid_est_mask = (est.timestamps >= start_time) & (est.timestamps <= end_time)
-        sync_timestamps = est.timestamps[valid_est_mask]
-        sync_est_pos = est.positions[valid_est_mask]
-        sync_est_quat = est.orientations[valid_est_mask]
-        
-        # 1. Interpolate Positions (Linear)
-        pos_interp_func = interp1d(gt.timestamps, gt.positions, axis=0, kind='linear')
-        sync_gt_pos = pos_interp_func(sync_timestamps)
-        
-        # 2. Interpolate Orientations (SLERP)
-        rotations = R.from_quat(gt.orientations)
-        slerp = Slerp(gt.timestamps, rotations)
-        sync_gt_quat = slerp(sync_timestamps).as_quat()
-        
-        sync_gt = TrajectoryData(sync_timestamps, sync_gt_pos, sync_gt_quat)
-        sync_est = TrajectoryData(sync_timestamps, sync_est_pos, sync_est_quat)
-        
+        gt_ts = np.asarray(gt.timestamps)
+        est_ts = np.asarray(est.timestamps)
+
+        # 1. Find nearest ground truth index for each estimate timestamp
+        idx = np.searchsorted(gt_ts, est_ts)
+        idx = np.clip(idx, 0, len(gt_ts) - 1)
+
+        # Check whether current or previous GT index is closer
+        idx_prev = np.clip(idx - 1, 0, len(gt_ts) - 1)
+        diff_curr = np.abs(gt_ts[idx] - est_ts)
+        diff_prev = np.abs(gt_ts[idx_prev] - est_ts)
+
+        best_gt_idx = np.where(diff_prev < diff_curr, idx_prev, idx)
+        best_diff = np.minimum(diff_curr, diff_prev)
+
+        # 2. Filter out matches where timestamp difference exceeds max_diff_sec (e.g., 10 ms)
+        valid_mask = best_diff <= max_diff_sec
+
+        valid_est_indices = np.where(valid_mask)[0]
+        valid_gt_indices = best_gt_idx[valid_mask]
+
+        # 3. Slice synchronized trajectory objects
+        sync_gt = TrajectoryData(
+            timestamps=gt_ts[valid_gt_indices],
+            positions=gt.positions[valid_gt_indices],
+            orientations=gt.orientations[valid_gt_indices],
+        )
+
+        sync_est = TrajectoryData(
+            timestamps=est_ts[valid_est_indices],
+            positions=est.positions[valid_est_indices],
+            orientations=est.orientations[valid_est_indices],
+        )
+
         return sync_gt, sync_est
 
     @staticmethod

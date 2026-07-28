@@ -2,7 +2,7 @@
 
 import numpy as np
 from vio_harness.evaluation.base_metric import MetricStrategy
-from vio_harness.models.trajectory import TrajectoryData
+from vio_harness.ingestion.base_parser import TrajectoryData
 
 class ATEStrategy(MetricStrategy):
     """

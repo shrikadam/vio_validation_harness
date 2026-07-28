@@ -21,7 +21,7 @@ def gt_data():
     gt_path = Path("dataset/tum_vi/room1_ground_truth.txt")
     
     # Mocking data here for the sake of an executable example
-    from vio_harness.models.trajectory import TrajectoryData
+    from vio_harness.ingestion.base_parser import TrajectoryData
     n_frames = 100
     return TrajectoryData(
         timestamps=np.linspace(0, 10, n_frames),
