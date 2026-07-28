@@ -78,51 +78,11 @@ Modern VIO pipelines represent rotations on the $SO(3)$ manifold and 6DoF poses 
 
 * **Logarithmic Map ($\log: SO(3) \to \mathfrak{so}(3)$)**: Converts a rotation matrix or quaternion back into its axis-angle vector representation.
 
-### Kinematic Extrapolation Math
-
-Given an optimized baseline state at time $t_0$:
-
-- Position $p_0$, Velocity $v_0$, Orientation $q_0$
-
-- Gyroscope bias $b_g$, Accelerometer bias $b_a$
-
-- IMU measurements at frequency $\sim 1000\text{Hz}$: Raw gyro $\tilde{\omega}$, Raw accel $\tilde{a}$
-
-To predict the pose at $t_{\text{future}} = t_0 + \Delta t$:
-
-1. **Bias Correction**:
-
-$$\omega = \tilde{\omega} - b_g$$
-
-$$a = \tilde{a} - b_a$$
-
-2. **Orientation Update ($SO(3)$ Integration)**:
-
-$$\Delta q = \exp\left(\frac{1}{2} \omega \Delta t\right) = \left[\cos\left(\frac{\Vert{}\omega\Vert{}\Delta t}{2}\right), \frac{\omega}{\Vert{}\omega\Vert{}}\sin\left(\frac{\Vert{}\omega\Vert{}\Delta t}{2}\right)\right]$$
-
-$$q_{\text{future}} = q_0 \otimes \Delta q$$
-
-3. **Translational Integration ($\mathbb{R}^3$ Space)**:
-Rotate local acceleration into world space using quaternion conjugation and subtract gravity ($g = [0, 0, 9.81]^T$):
-
-$$a_{\text{world}} = (q_0 \otimes a \otimes q_0^{-1}) - g$$
-
-$$v_{\text{future}} = v_0 + a_{\text{world}}\Delta t$$
-
-$$p_{\text{future}} = p_0 + v_0\Delta t + \frac{1}{2}a_{\text{world}}\Delta t^2$$
-
 ### 2.4 Hand-Eye Calibration ($AX = XB$)
 
 To compare headset SLAM trajectory estimates against external ground truth (e.g., OptiTrack or Vicon motion capture), you must solve the rigid body transformations:
 
 $$A_i X = X B_i$$
-```
-   [World Origin (Mocap)] -------------------> [Headset Origin (World)]
-            |                                           |
-            | (A_i: Mocap frame transformation)         | (B_i: Headset pose output)
-            v                                           v
-   [Mocap Markers on Rig] ------> (X) -------> [Internal Headset IMU]
-```
 
 - $A_i$: Relative motion between Mocap frames.
 
@@ -130,66 +90,76 @@ $$A_i X = X B_i$$
 
 - $X$: The static $SE(3)$ transformation (extrinsics) between the external Mocap marker tree and the headset’s internal IMU sensor center. Solved via dual quaternions or Kronecker products.
 
-## 3. VIO Architectures & Open-Source Codebases
+## 3. Kinematic Extrapolation in XR Pose Prediction
+
+In Extended Reality (XR), background tracking engines like **Visual-Inertial Odometry (VIO)** or **SLAM** (e.g., EKF or factor graph optimizers like iSAM2) continuously fuse slow camera frames ($\sim 30\text{--}60\text{ Hz}$) with fast IMU samples ($\sim 1000\text{ Hz}$) to compute a high-precision baseline state at timestamp $t_0$.
+
+Because VIO optimization takes several milliseconds to process, rendering directly from $t_0$ introduces **Motion-to-Photon (M2P) latency**, causing virtual content to swim and trigger motion sickness. To eliminate this delay, we use ultra-fast IMU dead-reckoning to extrapolate the pose to $t_{\text{future}} = t_0 + \Delta t$.
+
+### Key Frame Reference Context
+
+* **Tracking Origin & Base Frame:** The physical **IMU frame** ($B$) serves as the primary tracking origin. It runs at $\sim 1000\text{ Hz}$ with virtually zero latency. Camera lenses are mapped to this base frame via a static, factory-calibrated extrinsic transform ($T_{BC}$).
+* **Target Pose ($p_{\text{future}}$):** Extrapolation predicts the 3D position of the **headset rigid body origin** (the IMU itself). Before rendering, the graphics pipeline applies a fixed offset from $p_{\text{future}}$ to compute the exact coordinates for the user's left and right eye displays.
+
+### The Extrapolation Model
+
+Given an optimized baseline state at time $t_0$:
+
+* **Pose:** Position $p_0$, Velocity $v_0$, Orientation quaternion $q_0$
+* **Sensor Drift:** Gyroscope bias $b_g$, Accelerometer bias $b_a$
+* **Raw IMU Stream ($\sim 1000\text{ Hz}$):** Angular velocity $\tilde{\omega}$, Linear acceleration $\tilde{a}$
+
+#### Step 1: Sensor Bias Correction
+
+Cheap MEMS IMU sensors suffer from continuous thermal and electronic drift. We strip out the VIO-estimated bias terms ($b_g, b_a$) to extract true physical motion:
+
+$$\omega = \tilde{\omega} - b_g$$
+
+$$a = \tilde{a} - b_a$$
+
+#### Step 2: Orientation Integration in $SO(3)$ Space
+
+The angular velocity vector $\omega$ defines the axis and rate of rotation in radians per second ($\Vert{}\omega\Vert{}$). Because standard 3D angle addition suffers from gimbal lock and non-Euclidean distortion, we map the rotation vector into a localized delta quaternion $\Delta q$ using the **exponential map**:
+
+$$\Delta q = \exp\left(\frac{1}{2} \omega \Delta t\right) = \left[\cos\left(\frac{\Vert{}\omega\Vert{}\Delta t}{2}\right), \frac{\omega}{\Vert{}\omega\Vert{}}\sin\left(\frac{\Vert{}\omega\Vert{}\Delta t}{2}\right)\right]$$
+
+Applying this delta rotation onto our baseline orientation via quaternion multiplication yields the predicted orientation. Right-multiplication naturally applies the rotation in the local body frame, saving us the computational cost of rotating the data into world coordinates:
+
+$$q_{\text{future}} = q_0 \otimes \Delta q$$
+
+#### Step 3: Translational Integration in $\mathbb{R}^3$ Space
+
+Accelerometers measure forces along their internal, body-fixed axes—including an persistent upward reaction force from Earth's gravity ($g = [0, 0, 9.81]^T$).
+
+To compute true linear motion in world space:
+
+1. **Rotate local acceleration to world frame** using quaternion conjugation: $q_0 \otimes a \otimes q_0^{-1}$
+2. **Subtract gravity** to isolate real physical acceleration: $a_{\text{world}}$
+3. **Integrate Newtonian kinematics** over the extrapolation window $\Delta t$:
+
+$$a_{\text{world}} = (q_0 \otimes a \otimes q_0^{-1}) - g$$
+
+$$v_{\text{future}} = v_0 + a_{\text{world}}\Delta t$$
+
+$$p_{\text{future}} = p_0 + v_0\Delta t + \frac{1}{2}a_{\text{world}}\Delta t^2$$
+
+> #### The Drift Trap:
+> If we just integrated IMU data forever, the headset would fly through virtual walls in seconds. This is due to a compounding mathematical catastrophe triggered by even a fraction of a degree of uncorrected gyroscope bias ($\delta b_g$):
+>   * **Linear Orientation Drift ($t^1$)**: A constant gyro bias causes the headset's estimated tilt to slowly drift away from reality linearly over time.
+>   * **Quadratic Velocity Drift ($t^2$)**: Because the math thinks the headset is tilted when it isn't, it misaligns the gravity vector during subtraction. A fraction of Earth's gravity "leaks" into the horizontal plane, acting like a false acceleration. Integrated over time, this creates a velocity error that grows quadratically.
+>   * **Cubic Position Drift ($t^3$)**: Integrating that false velocity causes the estimated position to explode cubically. A tiny tilt error rapidly becomes a massive position error.
+>
+> To stop the cubic explosion, the camera frames act as reality checks via an Extended Kalman Filter (EKF). The EKF doesn't just track pose; its state vector also constantly solves for the drifting sensor biases ($b_g, b_a$).
+>   * **Reprojection Error**: The system takes known 3D room landmarks and projects them onto the camera's 2D image plane based on the currently predicted (and slightly drifted) IMU pose. It measures the pixel distance between where the landmarks should be and where the camera actually sees them.
+>   * **The Jacobian Sensitivity Matrix**: The filter calculates how a tiny tweak to the estimated gyroscope bias would move those pixels across the screen.
+>   * **The Snap**: Using this matrix, the filter applies a mathematical correction that simultaneously snaps the position/orientation back to reality and refines the estimated biases, flattening the curve of the drift for the next millisecond gap.
+
+## 4. VIO Architectures & Open-Source Codebases
 
 | Architecture Type | Key Features | Mathematical Engine | Top Codebases to Study |
 |---|---|---|---|
 | Filter-Based (MSCKF) | Sequential, low memory footprint, strict linear state updates. | Extended Kalman Filter (EKF), covariance propagation. | OpenVINS, MSCKF_VIO |
 | Optimization-Based (Factor Graphs) | Full/Sliding window batch optimization, higher accuracy, handles re-marginalization. | Non-linear Least Squares, Gauss-Newton / Levenberg-Marquardt. | Kimera-VIO (GTSAM), VINS-Mono (Ceres), ORB-SLAM3, Basalt |
-
-### 3.1 OpenVINS (University of Delaware)
-
-* **Why Study**: It features extensive theoretical derivation documents alongside clean C++ code.
-
-* **What to Inspect**:
-
-   - ```src/core/EKF.cpp```: Observe state vector layout (position, velocity, orientation quaternion, IMU biases, camera-IMU extrinsics).
-
-   - ```src/update/```: Inspect how visual feature reprojection residuals update the covariance matrix without adding feature states directly into the core EKF state (the MSCKF nullspace projection trick).
-
-### 3.2 Kimera-VIO (MIT / GTSAM)
-
-* **Why Study**: Demonstrates modern factor graph abstractions used in commercial XR pipelines.
-
-* **What to Inspect**:
-
-   * **IMU Pre-integration**: Look at how high-frequency IMU samples ($500\text{Hz}+$) between keyframes are pre-integrated into a single $SO(3)$ manifold factor to avoid re-integrating raw IMU data during graph optimization.
-
-   * **GTSAM Integration**: Observe how factor graph nodes (poses $x_k$, velocities $v_k$, biases $b_k$) are linked by non-linear measurement factors.
-
-### 3.3 VINS-Mono & Ceres Solver
-
-* **Why Study**: Industry baseline for sliding window estimation and marginalization.
-
-* **What to Inspect**:
-
-   * **Marginalization (Schur Complement)**: When an old frame drops out of the active sliding window, its information is not discarded. VINS converts visual/inertial constraints from the dropping frame into a prior factor over the remaining frames using the Schur complement on the Hessian matrix.
-
-## 4. Key References: Papers, Books & Datasets
-
-### 4.1 Foundational Papers & Texts
-
-1. **Trajectory Evaluation (ATE / RPE)**:
-
-   - Sturm et al. (TUM) - "A Benchmark for the Evaluation of RGB-D SLAM Systems": Defines Absolute Trajectory Error (ATE) and Relative Pose Error (RPE).
-
-   - Zhang & Scaramuzza (UZH) - "A Tutorial on Quantitative Trajectory Evaluation for Visual(-Inertial) Odometry": Explains scale alignment, yaw drift isolation, and segment-based RPE analysis.
-
-2. **Calibration**:
-
-   - Furgale et al. - "Continuous-Time Batch Estimation using B-Splines": Theoretical backing of Kalibr for continuous-time IMU-Camera spatiotemporal calibration.
-
-3. **Factor Graphs**:
-
-   - Dellaert & Kaess - "Factor Graphs for Robot Perception": The standard text on sparse matrix factorization, square-root SAM, and information matrices.
-
-### 4.2 Recommended Reference Datasets
-
-* **Meta Project Aria Datasets (ADT / AEA)**: The closest match to XR. Glasses-form-factor data with $1000\text{Hz}$ IMU, dual eye-tracking/world cameras, and sub-millimeter Mocap ground truth.
-
-* **TUM-VI (TUM Visual-Inertial)**: Handheld sequences with precise hardware sync and high-frequency Vicon Mocap ground truth.
-
-* **KAIST VIO / TartanAir**: Focuses on harsh motions, fast rotations ("whip pans"), dynamic illumination, and featureless environments.
 
 ## 5. Perception KPIs & Metrics in XR
 

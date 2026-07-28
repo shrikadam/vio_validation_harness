@@ -289,17 +289,32 @@ Quantitative ATE, one per system:
 
 ```bash
 evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/openvins/corridor4/trajectory_openvins.txt \
-  -a --save_results results/openvins_corridor4_ape.zip
+  -a --plot --save_results results/openvins_corridor4_ape.zip
 
 evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/basalt/corridor4/trajectory_basalt.txt \
-  -a --save_results results/basalt_corridor4_ape.zip
+  -a --plot --save_results results/basalt_corridor4_ape.zip
 
 evo_ape tum results/gt/corridor4/trajectory_ground_truth.txt results/orbslam3/corridor4/trajectory_orbslam3.txt \
-  -a --save_results results/orbslam3_corridor4_ape.zip
+  -a --plot --save_results results/orbslam3_corridor4_ape.zip
 ```
 
 `--save_results` zips are self-contained JSON+data (ATE RMSE/mean/median/std) — ready for a downstream validator.
 
+Similarly for RPE:
+
+```bash
+evo_rpe tum results/gt/corridor4/trajectory_ground_truth.txt results/openvins/corridor4/trajectory_openvins.txt \
+  --pose_relation trans_part --delta 1 --delta_unit f \
+  -a --plot --save_results results/openvins_corridor4_rpe.zip
+
+evo_rpe tum results/gt/corridor4/trajectory_ground_truth.txt results/basalt/corridor4/trajectory_basalt.txt \
+  --pose_relation trans_part --delta 1 --delta_unit f \
+  -a --plot --save_results results/basalt_corridor4_rpe.zip
+
+evo_rpe tum results/gt/corridor4/trajectory_ground_truth.txt results/orbslam3/corridor4/trajectory_orbslam3.txt \
+  --pose_relation trans_part --delta 1 --delta_unit f \
+  -a --plot --save_results results/orbslam3_corridor4_rpe.zip
+```
 ---
 
 ## Common pitfalls
